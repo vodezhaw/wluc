@@ -1,10 +1,27 @@
 
 from pathlib import Path
+from dataclasses import dataclass
 
 import numpy as np
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, TensorDataset
+
+
+@dataclass(frozen=True)
+class ScaleInfo:
+    mu_img: torch.Tensor
+    sigma_img: torch.Tensor
+    mu_y: torch.Tensor
+    sigma_y: torch.Tensor
+
+    def unscale(self, mu, sigma):
+        mu_ = mu * self.sigma_y
+        mu_ += self.mu_y
+
+        sigma_ = sigma * self.sigma_y
+
+        return mu_, sigma_
 
 
 def load_raw(data_dir = Path("./data/")) -> dict:
@@ -33,7 +50,7 @@ def load_raw(data_dir = Path("./data/")) -> dict:
             "pixel_arcmin": pixel_per_arcmin,
             "pixel_radians": pixel_per_arcmin / 60. / 180. * np.pi,
             "galaxies_per_arcmin2": galaxies_per_arcmin2,
-            "noise_level": noise_level,
+            "noise_sigma": noise_level,
             "n_cosmologies": 101,
             "n_realizations": 256,
             "img_w": 1424,
@@ -43,6 +60,17 @@ def load_raw(data_dir = Path("./data/")) -> dict:
     }
 
 
+def compute_scaling(samples, labels) -> ScaleInfo:
+    sigma_img, mu_img = torch.std_mean(samples)
+    sigma_y, mu_y = torch.std_mean(labels, dim=0)
+    return ScaleInfo(
+        mu_img=mu_img,
+        sigma_img=sigma_img,
+        mu_y=mu_y,
+        sigma_y=sigma_y,
+    )
+
+
 class NoisingDataset(Dataset):
 
     def __init__(
@@ -50,38 +78,29 @@ class NoisingDataset(Dataset):
         samples: torch.Tensor,
         labels: torch.Tensor,
         mask: torch.Tensor,
-        noise_level: float,
+        noise_sigma: float,
+        scale_info: ScaleInfo,
     ):
         self.samples = samples
         self.labels = labels
         self.mask = mask
-        self.noise_level = noise_level
+        self.noise_sigma = noise_sigma
+        self.scale_info = scale_info
 
         self.n_samples = self.samples.shape[0]
 
-        sigma_img, mu_img = torch.std_mean(self.samples, dim=0)
-        self.sigma_img = sigma_img
-        self.mu_img = mu_img
-
-        self.scaled_noise_level = noise_level / self.sigma_img
-
-        sigma_y, mu_y = torch.std_mean(self.labels, dim=0)
-        self.sigma_y = sigma_y
-        self.mu_y = mu_y
+        self.scaled_noise_sigma = self.noise_sigma / self.scale_info.sigma_img
 
         self.scaled_labels = self.labels.clone()
-        self.scaled_labels = (self.scaled_labels - self.mu_y) / self.sigma_y
+        self.scaled_labels = (self.scaled_labels - self.scale_info.mu_y) / self.scale_info.sigma_y
 
     def __len__(self) -> int:
         return self.n_samples
 
-    def __getitem__(self, index: int) -> dict:
+    def __getitem__(self, index: int):
         x = self.samples[index].clone()
-        z = (x - self.mu_img) / self.sigma_img
-        noisy = z + self.scaled_noise_level*torch.randn_like(z)
+        z = (x - self.scale_info.mu_img) / self.scale_info.sigma_img
+        noisy = z + self.scaled_noise_sigma*torch.randn_like(z)
         out = torch.zeros_like(self.mask, dtype=torch.float32)
         out[self.mask] = noisy
-        return {
-            "x": out,
-            "y": self.scaled_labels[index],
-        }
+        return out, self.scaled_labels[index]
