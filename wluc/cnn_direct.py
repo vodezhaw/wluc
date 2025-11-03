@@ -145,78 +145,90 @@ def main(
     splitter = KFold(n_splits=5, shuffle=True, random_state=0xdeadbeef)
     splits = [t for _, t in splitter.split(nuisance_ixs)]
 
-    test_mask = torch.zeros(raw['challenge_params']['n_realizations'], dtype=bool)
-    val_mask = torch.zeros(raw['challenge_params']['n_realizations'], dtype=bool)
-    train_mask = torch.zeros(raw['challenge_params']['n_realizations'], dtype=bool)
-
     flat_dim = raw['train'].shape[-1]
 
-    test_mask[splits[0]] = True
-    val_mask[splits[1]] = True
-    train_mask[splits[2]] = True
-    train_mask[splits[3]] = True
-    train_mask[splits[4]] = True
+    truths = []
+    mus = []
+    sigmas = []
+    for k in range(5):
+        test_ix = k % 5
+        val_ix = (k + 1) % 5
 
-    x_train = raw['train'][:, train_mask, :].view(-1, flat_dim)
-    y_train = raw['labels'][:, train_mask, :2].view(-1, 2)
-    x_val = raw['train'][:, val_mask, :].view(-1, flat_dim)
-    y_val = raw['labels'][:, val_mask, :2].view(-1, 2)
-    x_test = raw['train'][:, test_mask, :].view(-1, flat_dim)
-    y_test = raw['train'][:, test_mask, :2].view(-1, 2)
+        test_mask = torch.zeros(raw['challenge_params']['n_realizations'], dtype=bool)
+        val_mask = torch.zeros(raw['challenge_params']['n_realizations'], dtype=bool)
+        train_mask = torch.ones(raw['challenge_params']['n_realizations'], dtype=bool)
 
-    scale_info = compute_scaling(
-        samples=x_train,
-        labels=y_train,
-    )
+        test_mask[splits[test_ix]] = True
+        train_mask[splits[test_ix]] = False
 
-    train_dataset = NoisingDataset(
-        samples=x_train,
-        labels=y_train,
-        mask=raw['mask'],
-        noise_sigma=raw['challenge_params']['noise_sigma'],
-        scale_info=scale_info,
-    )
-    val_dataset = NoisingDataset(
-        samples=x_val,
-        labels=y_val,
-        mask=raw['mask'],
-        noise_sigma=raw['challenge_params']['noise_sigma'],
-        scale_info=scale_info,
-    )
-    test_dataset = NoisingDataset(
-        samples=x_test,
-        labels=y_test,
-        mask=raw['mask'],
-        noise_sigma=raw['challenge_params']['noise_sigma'],
-        scale_info=scale_info,
-    )
+        val_mask[splits[val_ix]] = True
+        train_mask[splits[val_ix]] = False
 
-    lit_model = LightningDirect()
+        x_train = raw['train'][:, train_mask, :].view(-1, flat_dim)
+        y_train = raw['labels'][:, train_mask, :2].view(-1, 2)
+        x_val = raw['train'][:, val_mask, :].view(-1, flat_dim)
+        y_val = raw['labels'][:, val_mask, :2].view(-1, 2)
+        x_test = raw['train'][:, test_mask, :].view(-1, flat_dim)
+        y_test = raw['labels'][:, test_mask, :2].view(-1, 2)
 
-    trainer = pl.Trainer(
-        max_epochs=20,
-        accelerator="auto",
-        devices="auto",
-    )
+        scale_info = compute_scaling(
+            samples=x_train,
+            labels=y_train,
+        )
 
-    trainer.fit(
-        lit_model,
-        DataLoader(train_dataset, batch_size=64, shuffle=True),
-        DataLoader(val_dataset, batch_size=64, shuffle=False),
-    )
+        train_dataset = NoisingDataset(
+            samples=x_train,
+            labels=y_train,
+            mask=raw['mask'],
+            noise_sigma=raw['challenge_params']['noise_sigma'],
+            scale_info=scale_info,
+        )
+        val_dataset = NoisingDataset(
+            samples=x_val,
+            labels=y_val,
+            mask=raw['mask'],
+            noise_sigma=raw['challenge_params']['noise_sigma'],
+            scale_info=scale_info,
+        )
+        test_dataset = NoisingDataset(
+            samples=x_test,
+            labels=y_test,
+            mask=raw['mask'],
+            noise_sigma=raw['challenge_params']['noise_sigma'],
+            scale_info=scale_info,
+        )
 
-    batched_preds = trainer.predict(lit_model, DataLoader(test_dataset, batch_size=64, shuffle=False))
-    mus = torch.cat([b['mu'] for b in batched_preds], dim=0)
-    sigmas = torch.cat([b['sigma'] for b in batched_preds], dim=0)
+        lit_model = LightningDirect()
 
-    mu, sigma = scale_info.unscale(mus, sigmas)
+        trainer = pl.Trainer(
+            max_epochs=10,
+            accelerator="auto",
+            devices="auto",
+        )
 
-    score = scoring(
-        true_cosmology=y_test,
-        inferred_cosmology=mu,
-        error_bars=sigma,
-    )
-    print(f"Score: {score:.3f}")
+        trainer.fit(
+            lit_model,
+            DataLoader(train_dataset, batch_size=64, shuffle=True),
+            DataLoader(val_dataset, batch_size=64, shuffle=False),
+        )
+
+        batched_preds = trainer.predict(lit_model, DataLoader(test_dataset, batch_size=64, shuffle=False))
+        mu_ = torch.cat([b['mu'] for b in batched_preds], dim=0)
+        sigma_ = torch.cat([b['sigma'] for b in batched_preds], dim=0)
+
+        mu, sigma = scale_info.unscale(mu_, sigma_)
+
+        score = scoring(
+            true_cosmology=y_test,
+            inferred_cosmology=mu,
+            error_bars=sigma,
+        )
+        print(f"Split: {k} -- Score: {score:.3f}")
+        truths.append(y_test)
+        mus.append(mu)
+        sigmas.append(sigma)
+
+    torch.save({"y_true": truths, "mu": mus, "sigma": sigmas}, "./calibration_data.pt")
 
 
 
