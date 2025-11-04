@@ -4,6 +4,8 @@ from typing import Tuple, Dict, Self
 
 import numpy as np
 
+from scipy import stats
+
 
 class ModularConformalCalibration(ABC):
 
@@ -14,75 +16,58 @@ class ModularConformalCalibration(ABC):
     @abstractmethod
     def calibration_score(
         self,
-        pred: Dict[str, np.ndarray],
+        mu: np.ndarray,
+        sigma: np.ndarray,
         y_true: np.ndarray,
     ) -> np.ndarray:
         raise NotImplementedError
 
+    def interpolation(self, candidate_scores) -> np.ndarray:
+        if self.xp is None or self.fp is None:
+            raise ValueError(f"this calibration method has not been fitted with `.fit`.")
+        return np.interp(candidate_scores, xp=self.xp, fp=self.fp)
+
     def fit(
         self,
-        pred: Dict[str, np.ndarray],
+        mu: np.ndarray,
+        sigma: np.ndarray,
         y_true: np.ndarray,
     ) -> Self:
-        scores = self.calibration_score(pred, y_true)
-        xp = np.sort(scores)
-        fp = np.arange(len(xp)) / len(xp)
+        scores = self.calibration_score(mu=mu, sigma=sigma, y_true=y_true)
+        ecdf = stats.ecdf(scores)
 
-        self.xp = xp
-        self.fp = fp
+        self.xp = ecdf.cdf.quantiles
+        self.fp = ecdf.cdf.probabilities
 
         return self
 
     def predict(
         self,
-        pred: Dict[str, np.ndarray],
-        n_samples: int,
-        y_min: float,
-        y_max: float,
-        n_discretization: int = 1000,
+        mu: np.ndarray,
+        sigma: np.ndarray,
+        y_cand: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        if self.xp is None or self.fp is None:
-            raise ValueError(f"this calibration method has not been fitted with `.fit`.")
+        assert len(mu) == len(sigma)
 
-        y_cand = np.linspace(y_min, y_max, n_discretization)
+        mu_ = np.zeros_like(mu)
+        sigma_ = np.zeros_like(sigma)
 
-        ys = np.zeros((n_samples, n_discretization))
-        scores = np.zeros((n_samples, n_discretization))
+        midpoints = (y_cand[1:] + y_cand[:-1]) / 2.
+        midpoints_squared = midpoints*midpoints
 
-        for ix in range(n_samples):
-            ys[ix, :] = y_cand
+        for ix, (m, s) in enumerate(zip(mu, sigma)):
+            cdf = self.interpolation(self.calibration_score(mu=m, sigma=s, y_true=y_cand))
+            dF = np.diff(cdf)
 
-        for jx in range(n_discretization):
-            scores[:, jx] = self.calibration_score(pred, ys[:, jx])
+            mu = np.sum(midpoints*dF)
+            m2 = np.sum(midpoints_squared*dF)
+            var = m2 - mu*mu
 
-        cdf = np.interp(
-            x=scores,
-            xp=self.xp,
-            fp=self.fp,
-        )
+            mu_[ix] = mu
+            sigma_[ix] = np.sqrt(max(var, 0.))
 
-        mu = np.zeros(n_samples)
-        sigma = np.zeros(n_samples)
+        return mu_, sigma_
 
-        for ix in range(n_samples):
-            y = ys[ix, :]
-            cdf_ = cdf[ix, :]
-
-            pos = y >= 0.
-            neg = y <= 0.
-
-            mean = np.trapezoid(1.0 - cdf_[pos], y[pos]) - np.trapezoid(cdf_[neg], y[neg])
-
-            moment2 = 2.*(np.trapezoid(y[pos]*(1. - cdf_[pos]), y[pos]) - np.trapezoid(y[neg]*cdf_[neg], y[neg]))
-
-            var = moment2 - mean*mean
-            var = max(var, 0.)
-            std = np.sqrt(var)
-
-            mu[ix] = mean
-            sigma[ix] = std
-
-        return mu, sigma
 
 
 class ZScoreMCC(ModularConformalCalibration):
@@ -92,9 +77,8 @@ class ZScoreMCC(ModularConformalCalibration):
 
     def calibration_score(
         self,
-        pred: Dict[str, np.ndarray],
+        mu: np.ndarray,
+        sigma: np.ndarray,
         y_true: np.ndarray,
     ) -> np.ndarray:
-        mu = pred['mu']
-        sigma = pred['sigma']
         return (y_true - mu) / sigma
