@@ -14,6 +14,7 @@ from torchvision.models import resnet18
 
 import lightning as pl
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 from wluc.dataset import load_raw, NoisingDataset, compute_scaling
 from wluc.scoring import scoring
@@ -70,7 +71,7 @@ class LightningResNet(pl.LightningModule):
         }
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=2e-4, weight_decay=1e-4)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=3e-4, weight_decay=1e-4)
         return optimizer
 
 
@@ -79,8 +80,10 @@ def main(
 ):
     raw = load_raw(data_folder)
 
+    n_splits = 8
+
     nuisance_ixs = np.arange(raw['challenge_params']['n_realizations'])
-    splitter = KFold(n_splits=5, shuffle=True, random_state=0xdeadbeef)
+    splitter = KFold(n_splits=n_splits, shuffle=True, random_state=0xdeadbeef)
     splits = [t for _, t in splitter.split(nuisance_ixs)]
 
     flat_dim = raw['train'].shape[-1]
@@ -88,9 +91,9 @@ def main(
     truths = []
     mus = []
     sigmas = []
-    for k in range(8):
-        test_ix = k % 8
-        val_ix = (k + 1) % 8
+    for k in range(n_splits):
+        test_ix = k % n_splits
+        val_ix = (k + 1) % n_splits
 
         test_mask = torch.zeros(raw['challenge_params']['n_realizations'], dtype=bool)
         val_mask = torch.zeros(raw['challenge_params']['n_realizations'], dtype=bool)
@@ -140,24 +143,37 @@ def main(
             model=new_resnet(out_features=2),
         )
 
+        check_pointing = ModelCheckpoint(
+            monitor="val_loss",
+            mode="min",
+            save_top_k=1,
+            filename=f"split-{k}-best.ckpt",
+        )
+        early_stopping = EarlyStopping(
+            monitor="val_loss",
+            mode="min",
+            patience=5,
+        )
         trainer = pl.Trainer(
             max_epochs=50,
             accelerator="auto",
             devices="auto",
-            callbacks=[
-                EarlyStopping(monitor="val_loss", mode="min"),
-            ],
+            callbacks=[check_pointing, early_stopping],
         )
 
         trainer.fit(
             lit_model,
-            DataLoader(train_dataset, batch_size=64, shuffle=True),
-            DataLoader(val_dataset, batch_size=64, shuffle=False),
+            DataLoader(train_dataset, batch_size=256, shuffle=True),
+            DataLoader(val_dataset, batch_size=256, shuffle=False),
         )
 
-        batched_preds = trainer.predict(lit_model, DataLoader(test_dataset, batch_size=64, shuffle=False))
+        best_model_path = check_pointing.best_model_path
+        best_model = LightningResNet.load_from_checkpoint(best_model_path)
+
+
+        batched_preds = trainer.predict(best_model, DataLoader(test_dataset, batch_size=256, shuffle=False))
         mu_ = torch.cat([b['mu'] for b in batched_preds], dim=0)
-        sigma_ = torch.ones_like(mu)
+        sigma_ = torch.ones_like(mu_)
 
         mu, sigma = scale_info.unscale(mu_, sigma_)
 
