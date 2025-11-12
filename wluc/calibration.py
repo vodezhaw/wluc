@@ -6,6 +6,47 @@ import numpy as np
 
 from scipy import stats
 
+from wluc.scoring import scoring
+
+
+class CheatingCalibration:
+
+    def __init__(self):
+        self.learned_sigma = None
+
+    def fit(
+        self,
+        mu: np.ndarray,
+        sigma: np.ndarray,
+        y_true: np.ndarray
+    ) -> Self:
+
+        def score_(m, s, y):
+            err = y - m
+            e2 = err*err
+            eb2 = s*s
+            return -np.mean(e2/eb2 + np.log(eb2) + 1000.*e2)
+
+        best_score = -np.inf
+        best_sigma = None
+        for cand in np.linspace(1e-3, 1., 1000):
+            s_ = score_(mu, np.ones_like(mu)*cand, y_true)
+            if s_ > best_score:
+                best_score = s_
+                best_sigma = cand
+
+        self.learned_sigma = best_sigma
+
+        return self
+
+    def predict(
+        self,
+        mu: np.ndarray,
+        sigma: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        return mu, np.ones_like(sigma)*self.learned_sigma
+
+
 
 class ModularConformalCalibration(ABC):
 
@@ -47,7 +88,7 @@ class ModularConformalCalibration(ABC):
         sigma: np.ndarray,
         y_cand: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        assert len(mu) == len(sigma)
+        assert sigma.shape == mu.shape
 
         mu_ = np.zeros_like(mu)
         sigma_ = np.zeros_like(sigma)
@@ -69,7 +110,6 @@ class ModularConformalCalibration(ABC):
         return mu_, sigma_
 
 
-
 class ZScoreMCC(ModularConformalCalibration):
 
     def __init__(self):
@@ -82,3 +122,16 @@ class ZScoreMCC(ModularConformalCalibration):
         y_true: np.ndarray,
     ) -> np.ndarray:
         return (y_true - mu) / sigma
+
+
+class PointMCC(ModularConformalCalibration):
+    def __init__(self):
+        super().__init__()
+
+    def calibration_score(
+        self,
+        mu: np.ndarray,
+        sigma: np.ndarray,
+        y_true: np.ndarray,
+    ) -> np.ndarray:
+        return y_true - mu
