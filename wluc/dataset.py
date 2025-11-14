@@ -104,3 +104,62 @@ class NoisingDataset(Dataset):
         out = torch.zeros_like(self.mask, dtype=torch.float32)
         out[self.mask] = noisy
         return out, self.scaled_labels[index]
+
+
+class StaticNoiseDataset(Dataset):
+
+    def __init__(
+        self,
+        samples: torch.Tensor,
+        labels: torch.Tensor,
+        mask: torch.Tensor,
+        noise_sigma: float,
+        scale_info: ScaleInfo,
+    ):
+        self.samples = samples
+        self.labels = labels
+        self.mask = mask
+        self.noise_sigma = noise_sigma
+        self.scale_info = scale_info
+
+        self.n_samples = self.samples.shape[0]
+
+        self.noised_samples = self.samples + torch.randn_like(self.samples) * noise_sigma
+
+        self.scaled_labels = self.labels.clone()
+        self.scaled_labels = (self.scaled_labels - self.scale_info.mu_y) / self.scale_info.sigma_y
+
+    def __len__(self):
+        return self.n_samples
+
+    def __getitem__(self, index: int):
+        x = self.noised_samples[index].clone()
+        z = (x - self.scale_info.mu_img) / self.scale_info.sigma_img
+        out = torch.zeros_like(self.mask, dtype=torch.float32)
+        out[self.mask] = z
+        return out, self.scaled_labels[index]
+
+
+class NoNoiseDataset(Dataset):
+
+    def __init__(
+        self,
+        samples: torch.Tensor,
+        mask: torch.Tensor,
+        scale_info: ScaleInfo,
+    ):
+        self.samples = samples
+        self.mask = mask
+        self.scale_info = scale_info
+
+        self.n_samples = self.samples.shape[0]
+
+    def __len__(self):
+        return self.n_samples
+
+    def __getitem__(self, index: int):
+        x = self.samples[index].clone()
+        z = (x - self.scale_info.mu_img) / self.scale_info.sigma_img
+        out = torch.zeros_like(self.mask, dtype=torch.float32)
+        out[self.mask] = z
+        return out, self.scale_info.mu_y  # y not used for test data
