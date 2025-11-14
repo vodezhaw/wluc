@@ -6,7 +6,7 @@ import numpy as np
 
 from scipy import stats
 
-from wluc.scoring import scoring
+from wluc.scoring import official_scoring
 
 
 class CheatingCalibration:
@@ -43,9 +43,36 @@ class CheatingCalibration:
         self,
         mu: np.ndarray,
         sigma: np.ndarray,
+        y_cand: np.ndarray = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         return mu, np.ones_like(sigma)*self.learned_sigma
 
+
+
+class RescaleCalibration:
+
+    def __init__(self):
+        self.scale_factor = None
+
+    def fit(
+        self,
+        mu: np.ndarray,
+        sigma: np.ndarray,
+        y_true: np.ndarray,
+    ) -> Self:
+        residuals = y_true - mu
+        zs = residuals / sigma
+        k = np.sqrt(np.mean(zs*zs))
+        self.scale_factor = k
+        return self
+
+    def predict(
+        self,
+        mu: np.ndarray,
+        sigma: np.ndarray,
+        y_cand: np.ndarray = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        return mu, self.scale_factor*sigma
 
 
 class ModularConformalCalibration(ABC):
