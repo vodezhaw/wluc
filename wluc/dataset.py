@@ -1,6 +1,6 @@
 
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 import numpy as np
 
@@ -22,6 +22,9 @@ class ScaleInfo:
         sigma_ = sigma * self.sigma_y
 
         return mu_, sigma_
+
+    def save(self, path: str | Path) -> None:
+        torch.save(asdict(self), str(path))
 
 
 def load_raw(data_dir = Path("./data/")) -> dict:
