@@ -12,7 +12,7 @@ from sklearn.model_selection import KFold
 import numpy as np
 
 from wluc.dataset import load_raw, NoisingDataset, compute_scaling
-from wluc.scoring import scoring
+from wluc.scoring import official_scoring
 
 
 # taken from https://github.com/FAIR-Universe/Cosmology_Challenge/blob/master/Phase_1_Startingkit_WL_CNN_Direct.ipynb
@@ -218,7 +218,7 @@ def main(
 
         mu, sigma = scale_info.unscale(mu_, sigma_)
 
-        score = scoring(
+        score = official_scoring(
             true_cosmology=y_test,
             inferred_cosmology=mu,
             error_bars=sigma,
