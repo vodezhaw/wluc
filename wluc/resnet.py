@@ -1,5 +1,6 @@
 
 from pathlib import Path
+import json
 
 import torch
 import torch.nn as nn
@@ -13,11 +14,9 @@ from sklearn.model_selection import KFold
 from torchvision.models import resnet18
 
 import lightning as pl
-from lightning.pytorch.callbacks.early_stopping import EarlyStopping
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import Callback
 
-from wluc.dataset import load_raw, NoisingDataset, compute_scaling, StaticNoiseDataset, NoNoiseDataset
-from wluc.scoring import official_scoring, hit_rate, precision
+from wluc.dataset import load_raw, NoisingDataset, compute_scaling, StaticNoiseDataset
 
 
 def new_resnet(
@@ -63,10 +62,17 @@ class LightningResNet(pl.LightningModule):
         self,
         model: nn.Module,
         epochs: int,
+        fold_dir: Path,
     ):
         super().__init__()
         self.model = model
         self.epochs = epochs
+        self.fold_dir = fold_dir
+
+        self._val_mu = None
+        self._val_log_var = None
+        self._val_y = None
+        self.__curr = 0
 
     def forward(self, x):
         out = self.model(x)
@@ -86,18 +92,63 @@ class LightningResNet(pl.LightningModule):
         mu, log_var = self(x.unsqueeze(1))
         loss = self.batch_loss(mu, log_var, y)
         self.log('train_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("train_r2", r2(y, mu).mean(), on_step=False, on_epoch=True, prog_bar=False)
-        self.log("train_mse", F.mse_loss(y, mu), on_step=False, on_epoch=True, prog_bar=False)
+        self.log("train_mse", F.mse_loss(y, mu), on_step=False, on_epoch=True, prog_bar=True)
         return loss
+
+    def on_validation_epoch_start(self) -> None:
+        self._val_mu = []
+        self._val_log_var = []
+        self._val_y = []
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
         mu, log_var = self(x.unsqueeze(1))
         loss = self.batch_loss(mu, log_var, y)
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("val_r2", r2(y, mu).mean(), on_step=False, on_epoch=True, prog_bar=False)
-        self.log("val_mse", F.mse_loss(y, mu), on_step=False, on_epoch=True, prog_bar=False)
+
+        self._val_mu.append(mu.detach().cpu())
+        self._val_log_var.append(log_var.detach().cpu())
+        self._val_y.append(y.detach().cpu())
+
         return loss
+
+    def on_validation_epoch_end(self) -> None:
+        if not self._val_mu:
+            return
+
+        mu = torch.cat(self._val_mu, dim=0)
+        log_var = torch.cat(self._val_log_var, dim=0)
+        y = torch.cat(self._val_y, dim=0)
+
+        mse = F.mse_loss(mu, y)
+        r2_ = r2(y, mu)
+        nll = self.batch_loss(mu, log_var, y)
+
+        self.log("val_mse", mse, prog_bar=True)
+        self.log("val_r2_min", r2_.min(), prog_bar=False)
+        self.log("val_r2_max", r2_.max(), prog_bar=False)
+        self.log("val_nll", nll, prog_bar=True)
+        self.log("val_loss", nll, prog_bar=False)
+
+        if self.trainer is not None and not self.trainer.sanity_checking:
+            metrics = {
+                "num": self.__curr,
+                "val_mse": mse.item(),
+                "val_r2_min": r2_.min().item(),
+                "val_r2_max": r2_.max().item(),
+                "val_nll": nll.item(),
+            }
+            ckpt_path = self.fold_dir / f"model-{self.__curr:02d}.ckpt"
+            self.trainer.save_checkpoint(ckpt_path)
+
+            with (self.fold_dir / "metrics.jsonl").open('a') as fout:
+                fout.write(json.dumps(metrics))
+                fout.write('\n')
+
+            self.__curr += 1
+
+        self._val_mu = None
+        self._val_log_var = None
+        self._val_y = None
 
     def predict_step(self, batch, batch_idx):
         x, _ = batch
@@ -140,6 +191,7 @@ class LightningResNet(pl.LightningModule):
 
 def main(
         data_folder: Path = Path("./data"),
+        out_folder: Path = Path("./out"),
 ):
     raw = load_raw(data_folder)
 
@@ -151,12 +203,19 @@ def main(
 
     flat_dim = raw['train'].shape[-1]
 
-    truths = []
-    mus = []
-    sigmas = []
+    if not out_folder.exists():
+        out_folder.mkdir()
+
     for k in range(n_splits):
         test_ix = k % n_splits
         val_ix = (k + 1) % n_splits
+
+        fold_dir = out_folder / f"fold-{k}"
+        if not fold_dir.exists():
+            fold_dir.mkdir()
+        else:
+            # so we can resume runs
+            continue
 
         test_mask = torch.zeros(raw['challenge_params']['n_realizations'], dtype=bool)
         val_mask = torch.zeros(raw['challenge_params']['n_realizations'], dtype=bool)
@@ -179,6 +238,15 @@ def main(
             samples=x_train,
             labels=y_train,
         )
+        scale_info.save(fold_dir / "scale_info.pt")
+
+        data_dict = {
+            "x_val": x_val,
+            "y_val": y_val,
+            "x_calib": x_test,
+            "y_calib": y_test,
+        }
+        torch.save(data_dict, str(fold_dir / "data.pt"))
 
         train_dataset = NoisingDataset(
             samples=x_train,
@@ -194,36 +262,18 @@ def main(
             noise_sigma=raw['challenge_params']['noise_sigma'],
             scale_info=scale_info,
         )
-        test_dataset = StaticNoiseDataset(
-            samples=x_test,
-            labels=y_test,
-            mask=raw['mask'],
-            noise_sigma=raw['challenge_params']['noise_sigma'],
-            scale_info=scale_info,
-        )
 
-        max_epochs = 50
+        max_epochs = 30
         lit_model = LightningResNet(
             model=new_resnet(),
             epochs=max_epochs,
+            fold_dir=fold_dir,
         )
 
-        check_pointing = ModelCheckpoint(
-            monitor="val_loss",
-            mode="min",
-            save_top_k=1,
-            filename=f"split-{k}-best.ckpt",
-        )
-        early_stopping = EarlyStopping(
-            monitor="val_loss",
-            mode="min",
-            patience=10,
-        )
         trainer = pl.Trainer(
             max_epochs=max_epochs,
             accelerator="auto",
             devices="auto",
-            callbacks=[check_pointing, early_stopping],
             gradient_clip_val=1.0,
         )
 
@@ -233,46 +283,16 @@ def main(
             DataLoader(val_dataset, batch_size=256, shuffle=False),
         )
 
-        best_model_path = check_pointing.best_model_path
-        best_model = LightningResNet.load_from_checkpoint(best_model_path, model=new_resnet(), epochs=max_epochs)
-
-
-        batched_preds = trainer.predict(best_model, DataLoader(test_dataset, batch_size=256, shuffle=False))
-        mu_ = torch.cat([b['mu'] for b in batched_preds], dim=0)
-        sigma_ = torch.cat([b['sigma'] for b in batched_preds], dim=0)
-
-        mu, sigma = scale_info.unscale(mu_, sigma_)
-
-        score = official_scoring(
-            true_cosmology=y_test,
-            inferred_cosmology=mu,
-            error_bars=sigma,
-        )
-        hits = hit_rate(
-            true_cosmology=y_test,
-            inferred_cosmology=mu,
-            error_bars=sigma,
-        )
-        prec = precision(
-            true_cosmology=y_test,
-            inferred_cosmology=mu,
-            error_bars=sigma,
-        )
-        print(f"Split: {k} -- L1: {F.l1_loss(mu, y_test).item():.3f} -- L2: {F.mse_loss(mu, y_test).item():.3f} == R2: {r2(y_test, mu).mean().item():.3f}")
-        print(f"Split {k} -- Score: {score:.3f} -- Hit: {hits:.3f} -- P: {prec:.3f}")
-        truths.append(y_test)
-        mus.append(mu)
-        sigmas.append(sigma)
-
-    torch.save({"y_true": truths, "mu": mus, 'sigma': sigmas}, "./calibration_data_resnet.pt")
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('-d', '--data', dest="data", type=Path, required=False, default=Path("./data"))
+    parser.add_argument("-o", "--output", dest="output", type=Path, required=False, default=Path("./output"))
     args = parser.parse_args()
 
     main(
         data_folder=args.data,
+        out_folder=args.output,
     )
