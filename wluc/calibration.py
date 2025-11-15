@@ -1,12 +1,12 @@
 
 from abc import abstractmethod, ABC
-from typing import Tuple, Dict, Self
+from typing import Tuple, Self
+
+import torch
 
 import numpy as np
 
 from scipy import stats
-
-from wluc.scoring import official_scoring
 
 
 class CheatingCalibration:
@@ -72,6 +72,32 @@ class RescaleCalibration:
         sigma: np.ndarray,
         y_cand: np.ndarray = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
+        return mu, self.scale_factor*sigma
+
+
+class TorchRescaleCalibration:
+
+    def __init__(self):
+        self.scale_factor = None
+
+    def fit(
+        self,
+        mu: torch.Tensor,
+        sigma: torch.Tensor,
+        y_true: torch.Tensor,
+    ) -> Self:
+        residuals = y_true - mu
+        zs = residuals / sigma
+        ks = torch.sqrt(torch.mean(zs*zs, dim=0))
+        self.scale_factor = ks
+        return self
+
+    def predict(
+        self,
+        mu: torch.Tensor,
+        sigma: torch.Tensor,
+        y_cand: torch.Tensor | None = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         return mu, self.scale_factor*sigma
 
 
