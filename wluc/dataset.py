@@ -1,6 +1,8 @@
 
 from pathlib import Path
 from dataclasses import dataclass, asdict
+import json
+import zipfile
 
 import numpy as np
 
@@ -166,3 +168,22 @@ class NoNoiseDataset(Dataset):
         out = torch.zeros_like(self.mask, dtype=torch.float32)
         out[self.mask] = z
         return out, self.scale_info.mu_y  # y not used for test data
+
+
+def create_submission_file(
+    mu: torch.Tensor,
+    sigma: torch.Tensor,
+    path: str | Path,
+) -> None:
+    assert mu.shape == (4000, 2)
+    assert sigma.shape == (4000, 2)
+
+    out = {
+        "means": mu.tolist(),
+        "errorbars": sigma.tolist(),
+    }
+
+    json_str = json.dumps(out, indent=2)
+
+    with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("result.json", json_str)
