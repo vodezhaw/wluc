@@ -18,8 +18,7 @@ def ensemble_predictions(
 
     var_aleatoric = torch.mean(variances, dim=0)
 
-    diffs = mus - mu_ensemble.unsqueeze(0)
-    var_epistemic = torch.mean(diffs*diffs, dim=0)
+    var_epistemic = torch.var(mus, dim=0, unbiased=False)
 
     var_ensemble = var_aleatoric + var_epistemic
 
