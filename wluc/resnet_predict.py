@@ -61,8 +61,9 @@ def pareto_frontier(
 def main(
     result_folder: Path,
     data_folder: Path,
+    use_holdout: bool,
 ):
-    competition_data = load_raw(data_folder)
+    competition_data = load_raw(data_folder, use_holdout=use_holdout)
     del competition_data['train']  # save some RAM and we don't need training data here
     del competition_data['labels']
 
@@ -141,7 +142,11 @@ def main(
             }
             predictions.append(pred_item)
 
-    torch.save(predictions, str(result_folder / "calibrated_predictions.pt"))
+    if use_holdout:
+        out_file = result_folder / "predictions_holdout.pt"
+    else:
+        out_file = result_folder / "calibrated_predictions.pt"
+    torch.save(predictions, str(out_file))
 
 
 if __name__ == "__main__":
@@ -149,9 +154,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--data-folder", dest="data_folder", type=Path, required=False, default=Path("./data/"))
     parser.add_argument("-o", "--output-folder", dest="output_folder", type=Path, required=False, default=Path("./out/"))
+    parser.add_argument("--use-holdout", dest="use_holdout", action="store_true")
     args = parser.parse_args()
 
     main(
         result_folder=args.output_folder,
         data_folder=args.data_folder,
+        use_holdout=args.use_holdout,
     )

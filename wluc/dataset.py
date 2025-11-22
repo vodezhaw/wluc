@@ -29,10 +29,16 @@ class ScaleInfo:
         torch.save(asdict(self), str(path))
 
 
-def load_raw(data_dir = Path("./data/")) -> dict:
+def load_raw(
+    data_dir = Path("./data/"),
+    use_holdout: bool = False,
+) -> dict:
     mask_file = data_dir / "WIDE12H_bin2_2arcmin_mask.npy"
     train_file = data_dir / "WIDE12H_bin2_2arcmin_kappa.npy"
-    test_file = data_dir / "WIDE12H_bin2_2arcmin_kappa_noisy_test.npy"
+    if use_holdout:
+        test_file = data_dir / "WIDE12H_bin2_2arcmin_kappa_noisy_Phase1_holdout.npy"
+    else:
+        test_file = data_dir / "WIDE12H_bin2_2arcmin_kappa_noisy_test.npy"
     label_file = data_dir / "label.npy"
 
     mask = torch.from_numpy(np.load(mask_file))
