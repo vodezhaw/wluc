@@ -135,6 +135,9 @@ def main(
                 "model": checkpoint.stem,
                 "mu": mu_test,
                 "sigma": sigma_test,
+                "mu_calib": mu_calib,
+                "sigma_calib": sigma_calib,
+                "y_calib": data['y_calib'],
             }
             predictions.append(pred_item)
 
